@@ -1,0 +1,424 @@
+-- language: Lua, file: ESP_Full.lua
+-- target: Roblox Executor (Synapse X / ScriptWare / KRNL)
+
+if _G.__ESP_LOADED then return end
+_G.__ESP_LOADED = true
+
+_G.FriendColor  = Color3.fromRGB(0, 255, 100)
+_G.EnemyColor   = Color3.fromRGB(255, 50,  50)
+_G.UseTeamColor = true
+
+local CFG = {
+    BoxThickness  = 1.5,
+    HeadRadius    = 5,
+    LineThickness = 1,
+    NameSize      = 13,
+    HPSize        = 11,
+    CountSize     = 18,
+    BoxWidthRatio = 0.55,
+    FeetOffset    = 3.5,
+    HPBarWidth    = 4,
+    HPBarGap      = 3,
+}
+
+local FLAGS = {
+    MenuOpen  = false,
+    Box       = true,
+    Head      = true,
+    Line      = true,
+    Name      = true,
+    HP        = true,
+    Highlight = true,
+}
+
+local Players     = game:GetService("Players")
+local RunService  = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+local function getColor(player)
+    if _G.UseTeamColor then return player.TeamColor.Color end
+    return (LocalPlayer.TeamColor == player.TeamColor) and _G.FriendColor or _G.EnemyColor
+end
+
+local function hpColor(pct)
+    if pct > 0.5 then
+        return Color3.fromRGB(math.floor(255*(1-pct)*2), 255, 0)
+    else
+        return Color3.fromRGB(255, math.floor(255*pct*2), 0)
+    end
+end
+
+local function makeLine(thick, color)
+    local l = Drawing.new("Line")
+    l.Visible = false; l.Thickness = thick; l.Color = color; l.ZIndex = 5
+    return l
+end
+
+local function makeCircle(radius, thick, color)
+    local c = Drawing.new("Circle")
+    c.Visible = false; c.Filled = false; c.Thickness = thick
+    c.Radius = radius; c.Color = color; c.ZIndex = 5
+    return c
+end
+
+local function makeText(size, color, center)
+    local t = Drawing.new("Text")
+    t.Visible = false; t.Size = size; t.Color = color
+    t.Outline = true; t.Center = (center ~= false); t.ZIndex = 6
+    return t
+end
+
+local ESPCache  = {}
+local DRAW_KEYS = {"BoxTop","BoxBot","BoxLeft","BoxRight","Head","Line","Name","HPBg","HPFill","HPText"}
+
+local function createDrawings(player)
+    if ESPCache[player] then return end
+    local col = getColor(player)
+    ESPCache[player] = {
+        BoxTop   = makeLine(CFG.BoxThickness, col),
+        BoxBot   = makeLine(CFG.BoxThickness, col),
+        BoxLeft  = makeLine(CFG.BoxThickness, col),
+        BoxRight = makeLine(CFG.BoxThickness, col),
+        Head     = makeCircle(CFG.HeadRadius, CFG.BoxThickness, col),
+        Line     = makeLine(CFG.LineThickness, col),
+        Name     = makeText(CFG.NameSize, Color3.fromRGB(255,255,255), true),
+        HPBg     = makeLine(CFG.HPBarWidth+2, Color3.fromRGB(0,0,0)),
+        HPFill   = makeLine(CFG.HPBarWidth, Color3.fromRGB(0,255,0)),
+        HPText   = makeText(CFG.HPSize, Color3.fromRGB(255,255,255), true),
+    }
+    ESPCache[player].Name.Text = player.Name
+end
+
+local function removeDrawings(player)
+    local esp = ESPCache[player]
+    if not esp then return end
+    for _, key in ipairs(DRAW_KEYS) do pcall(function() esp[key]:Remove() end) end
+    ESPCache[player] = nil
+end
+
+local function hideDrawings(player)
+    local esp = ESPCache[player]
+    if not esp then return end
+    for _, key in ipairs(DRAW_KEYS) do pcall(function() esp[key].Visible = false end) end
+end
+
+local function applyHighlight(player)
+    if not FLAGS.Highlight then return end
+    local char = player.Character
+    if not char then return end
+    local old = char:FindFirstChild("__ESPhl")
+    if old then old:Destroy() end
+    local hl = Instance.new("Highlight")
+    hl.Name = "__ESPhl"; hl.Adornee = char
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.FillColor = getColor(player); hl.FillTransparency = 0.5
+    hl.OutlineColor = getColor(player); hl.OutlineTransparency = 0
+    hl.Parent = char
+end
+
+local function removeHighlight(player)
+    local char = player.Character
+    if not char then return end
+    local hl = char:FindFirstChild("__ESPhl")
+    if hl then hl:Destroy() end
+end
+
+local function onCharAdded(player, char)
+    char:WaitForChild("Humanoid", 8)
+    char:WaitForChild("HumanoidRootPart", 8)
+    char:WaitForChild("Head", 8)
+    createDrawings(player)
+    applyHighlight(player)
+end
+
+local function hookPlayer(player)
+    if player == LocalPlayer then return end
+    createDrawings(player)
+    player.CharacterAdded:Connect(function(char) task.spawn(onCharAdded, player, char) end)
+    player.CharacterRemoving:Connect(function() hideDrawings(player) end)
+    player:GetPropertyChangedSignal("TeamColor"):Connect(function()
+        local esp = ESPCache[player]
+        if not esp then return end
+        local col = getColor(player)
+        for _, key in ipairs({"BoxTop","BoxBot","BoxLeft","BoxRight","Head","Line"}) do
+            esp[key].Color = col
+        end
+        local char = player.Character
+        if char then
+            local hl = char:FindFirstChild("__ESPhl")
+            if hl then hl.FillColor = col; hl.OutlineColor = col end
+        end
+    end)
+    if player.Character then task.spawn(onCharAdded, player, player.Character) end
+end
+
+-- Player Count (Drawing) - to giữa trên
+local CountLabel = Drawing.new("Text")
+CountLabel.Visible = true
+CountLabel.Size    = CFG.CountSize
+CountLabel.Color   = Color3.fromRGB(255, 50, 50)
+CountLabel.Outline = true
+CountLabel.Center  = true
+CountLabel.ZIndex  = 10
+
+------------------------------------------------------------------------
+-- Menu UI
+------------------------------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name           = "ESPMenu"
+gui.ResetOnSpawn   = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent         = game.CoreGui
+
+-- Toggle button (On/Off) - góc trên phải, bo góc
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Size              = UDim2.new(0, 80, 0, 32)
+ToggleBtn.Position          = UDim2.new(1, -92, 0, 12)
+ToggleBtn.BackgroundColor3  = Color3.fromRGB(30, 215, 96)
+ToggleBtn.TextColor3        = Color3.fromRGB(255, 255, 255)
+ToggleBtn.Text              = "ON"
+ToggleBtn.Font              = Enum.Font.GothamBold
+ToggleBtn.TextSize          = 14
+ToggleBtn.BorderSizePixel   = 0
+ToggleBtn.AutoButtonColor   = false
+ToggleBtn.Parent            = gui
+local tc = Instance.new("UICorner", ToggleBtn)
+tc.CornerRadius = UDim.new(0, 10)
+local ts = Instance.new("UIStroke", ToggleBtn)
+ts.Color = Color3.fromRGB(255,255,255); ts.Thickness = 1.2
+
+-- Panel chính
+local Panel = Instance.new("Frame")
+Panel.Size             = UDim2.new(0, 220, 0, 310)
+Panel.Position         = UDim2.new(1, -232, 0, 52)
+Panel.BackgroundColor3 = Color3.fromRGB(12, 12, 12)
+Panel.BorderSizePixel  = 0
+Panel.Visible          = false
+Panel.Parent           = gui
+local pc = Instance.new("UICorner", Panel)
+pc.CornerRadius = UDim.new(0, 14)
+local ps = Instance.new("UIStroke", Panel)
+ps.Color = Color3.fromRGB(60, 60, 60); ps.Thickness = 1
+
+-- Header
+local Header = Instance.new("Frame")
+Header.Size            = UDim2.new(1, 0, 0, 42)
+Header.BackgroundColor3= Color3.fromRGB(22, 22, 22)
+Header.BorderSizePixel = 0
+Header.Parent          = Panel
+local hc = Instance.new("UICorner", Header)
+hc.CornerRadius = UDim.new(0, 14)
+-- fix bo góc dưới header
+local hfix = Instance.new("Frame")
+hfix.Size = UDim2.new(1,0,0,14)
+hfix.Position = UDim2.new(0,0,1,-14)
+hfix.BackgroundColor3 = Color3.fromRGB(22,22,22)
+hfix.BorderSizePixel = 0
+hfix.Parent = Header
+
+local HeaderTitle = Instance.new("TextLabel")
+HeaderTitle.Size              = UDim2.new(1, 0, 1, 0)
+HeaderTitle.BackgroundTransparency = 1
+HeaderTitle.Text              = "  ESP Bu 💢"
+HeaderTitle.TextColor3        = Color3.fromRGB(255, 255, 255)
+HeaderTitle.Font              = Enum.Font.GothamBold
+HeaderTitle.TextSize          = 14
+HeaderTitle.TextXAlignment    = Enum.TextXAlignment.Left
+HeaderTitle.Parent            = Header
+
+-- Scroll/list area
+local ListFrame = Instance.new("Frame")
+ListFrame.Size             = UDim2.new(1, 0, 1, -50)
+ListFrame.Position         = UDim2.new(0, 0, 0, 50)
+ListFrame.BackgroundTransparency = 1
+ListFrame.Parent           = Panel
+
+local Layout = Instance.new("UIListLayout", ListFrame)
+Layout.SortOrder = Enum.SortOrder.LayoutOrder
+Layout.Padding   = UDim.new(0, 6)
+
+local Pad = Instance.new("UIPadding", ListFrame)
+Pad.PaddingLeft  = UDim.new(0, 10)
+Pad.PaddingRight = UDim.new(0, 10)
+Pad.PaddingTop   = UDim.new(0, 6)
+
+-- Row factory
+local function makeRow(label, flag, order, onChange)
+    local row = Instance.new("Frame")
+    row.Size             = UDim2.new(1, 0, 0, 38)
+    row.BackgroundColor3 = Color3.fromRGB(22, 22, 22)
+    row.BorderSizePixel  = 0
+    row.LayoutOrder      = order
+    row.Parent           = ListFrame
+    Instance.new("UICorner", row).CornerRadius = UDim.new(0, 8)
+
+    local lbl = Instance.new("TextLabel", row)
+    lbl.Size              = UDim2.new(1, -90, 1, 0)
+    lbl.Position          = UDim2.new(0, 12, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text              = label
+    lbl.TextColor3        = Color3.fromRGB(200, 200, 200)
+    lbl.Font              = Enum.Font.GothamSemibold
+    lbl.TextSize          = 13
+    lbl.TextXAlignment    = Enum.TextXAlignment.Left
+
+    -- On/Off button
+    local btn = Instance.new("TextButton", row)
+    btn.Size             = UDim2.new(0, 58, 0, 26)
+    btn.Position         = UDim2.new(1, -68, 0.5, -13)
+    btn.BorderSizePixel  = 0
+    btn.Font             = Enum.Font.GothamBold
+    btn.TextSize         = 12
+    btn.AutoButtonColor  = false
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 8)
+
+    local function refresh()
+        local on = FLAGS[flag]
+        btn.Text             = on and "ON" or "OFF"
+        btn.TextColor3       = Color3.fromRGB(255, 255, 255)
+        btn.BackgroundColor3 = on
+            and Color3.fromRGB(30, 200, 80)
+            or  Color3.fromRGB(180, 40, 40)
+    end
+    refresh()
+
+    btn.MouseButton1Click:Connect(function()
+        FLAGS[flag] = not FLAGS[flag]
+        refresh()
+        if onChange then onChange(FLAGS[flag]) end
+    end)
+end
+
+makeRow("Box",       "Box",       1)
+makeRow("Đầu",  "Head",      2)
+makeRow("Tracer",    "Line",      3)
+makeRow("Tên",       "Name",      4)
+makeRow("Máu",       "HP",        5)
+makeRow("Highlight", "Highlight", 6, function(on)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            if on then applyHighlight(p) else removeHighlight(p) end
+        end
+    end
+end)
+
+-- Toggle menu open/close
+ToggleBtn.MouseButton1Click:Connect(function()
+    FLAGS.MenuOpen = not FLAGS.MenuOpen
+    Panel.Visible  = FLAGS.MenuOpen
+    if FLAGS.MenuOpen then
+        ToggleBtn.Text             = "OFF"
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
+    else
+        ToggleBtn.Text             = "ON"
+        ToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 215, 96)
+    end
+end)
+
+------------------------------------------------------------------------
+-- Render loop
+------------------------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+    local cam      = workspace.CurrentCamera
+    local vp       = cam.ViewportSize
+    local lineFrom = Vector2.new(vp.X * 0.5, vp.Y)
+    local total    = 0
+
+    CountLabel.Position = Vector2.new(vp.X * 0.5, 28)
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        total = total + 1
+
+        local esp = ESPCache[player]
+        if not esp then continue end
+
+        local char = player.Character
+        if not char then hideDrawings(player); continue end
+
+        local humanoid = char:FindFirstChildOfClass("Humanoid")
+        local hrp      = char:FindFirstChild("HumanoidRootPart")
+        local head     = char:FindFirstChild("Head")
+
+        if not humanoid or not hrp or not head or humanoid.Health <= 0 then
+            hideDrawings(player); continue
+        end
+
+        local headTop = head.Position + Vector3.new(0, head.Size.Y*0.5, 0)
+        local feet    = hrp.Position  - Vector3.new(0, CFG.FeetOffset, 0)
+        local headCtr = head.Position
+
+        local htSP = cam:WorldToViewportPoint(headTop)
+        local ftSP = cam:WorldToViewportPoint(feet)
+        local hcSP = cam:WorldToViewportPoint(headCtr)
+
+        if htSP.Z < 0 then hideDrawings(player); continue end
+
+        local col  = getColor(player)
+        local bH   = math.abs(htSP.Y - ftSP.Y)
+        local bW   = bH * CFG.BoxWidthRatio
+        local cx   = htSP.X
+        local bTop = htSP.Y
+        local bBot = ftSP.Y
+        local bL   = cx - bW*0.5
+        local bR   = cx + bW*0.5
+
+        -- Box
+        esp.BoxTop.From    = Vector2.new(bL, bTop); esp.BoxTop.To    = Vector2.new(bR, bTop)
+        esp.BoxTop.Color   = col;                    esp.BoxTop.Visible= FLAGS.Box
+        esp.BoxBot.From    = Vector2.new(bL, bBot); esp.BoxBot.To    = Vector2.new(bR, bBot)
+        esp.BoxBot.Color   = col;                    esp.BoxBot.Visible= FLAGS.Box
+        esp.BoxLeft.From   = Vector2.new(bL, bTop); esp.BoxLeft.To   = Vector2.new(bL, bBot)
+        esp.BoxLeft.Color  = col;                    esp.BoxLeft.Visible= FLAGS.Box
+        esp.BoxRight.From  = Vector2.new(bR, bTop); esp.BoxRight.To  = Vector2.new(bR, bBot)
+        esp.BoxRight.Color = col;                    esp.BoxRight.Visible= FLAGS.Box
+
+        -- Head
+        esp.Head.Position = Vector2.new(hcSP.X, hcSP.Y)
+        esp.Head.Color    = col; esp.Head.Visible = FLAGS.Head
+
+        -- Tracer
+        esp.Line.From    = lineFrom
+        esp.Line.To      = Vector2.new(cx, bBot)
+        esp.Line.Color   = col; esp.Line.Visible = FLAGS.Line
+
+        -- Name
+        esp.Name.Text     = player.Name
+        esp.Name.Position = Vector2.new(cx, bTop - 16)
+        esp.Name.Visible  = FLAGS.Name
+
+        -- HP bar
+        local pct = math.clamp(humanoid.Health / math.max(humanoid.MaxHealth, 1), 0, 1)
+        local hpH = bH * pct
+        local barX = bL - CFG.HPBarGap
+
+        esp.HPBg.From    = Vector2.new(barX, bTop)
+        esp.HPBg.To      = Vector2.new(barX, bBot)
+        esp.HPBg.Visible = FLAGS.HP
+
+        esp.HPFill.From    = Vector2.new(barX, bBot)
+        esp.HPFill.To      = Vector2.new(barX, bBot - hpH)
+        esp.HPFill.Color   = hpColor(pct)
+        esp.HPFill.Visible = FLAGS.HP
+
+        esp.HPText.Text     = math.floor(pct*100).."%"
+        esp.HPText.Position = Vector2.new(barX, bTop - 14)
+        esp.HPText.Visible  = FLAGS.HP
+
+        -- Highlight sync
+        local hl = char:FindFirstChild("__ESPhl")
+        if hl then hl.FillColor = col; hl.OutlineColor = col end
+    end
+
+    CountLabel.Text = string.format("%s : %d", "\240\159\145\164", total)
+end)
+
+------------------------------------------------------------------------
+-- Init
+------------------------------------------------------------------------
+for _, player in ipairs(Players:GetPlayers()) do
+    task.spawn(hookPlayer, player)
+end
+
+Players.PlayerAdded:Connect(hookPlayer)
+Players.PlayerRemoving:Connect(removeDrawings)
