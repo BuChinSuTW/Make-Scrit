@@ -1,0 +1,689 @@
+-- language: Lua
+-- target: Roblox Executor (Synapse X / ScriptWare / KRNL)
+
+if _G.__ESP_LOADED then return end
+_G.__ESP_LOADED = true
+
+local Players      = game:GetService("Players")
+local RunService   = game:GetService("RunService")
+local UserInputSvc = game:GetService("UserInputService")
+local LocalPlayer  = Players.LocalPlayer
+local Camera       = workspace.CurrentCamera
+
+local CFG = {
+    BoxThickness  = 1.5,
+    HeadRadius    = 5,
+    LineThickness = 1,
+    NameSize      = 13,
+    HPSize        = 11,
+    BoxWidthRatio = 0.55,
+    FeetOffset    = 3.5,
+    HPBarWidth    = 4,
+    HPBarGap      = 3,
+}
+
+local FLAGS = {
+    MenuOpen   = false,
+    Box        = true,
+    Head       = true,
+    Line       = true,
+    Name       = true,
+    HP         = true,
+    Highlight  = true,
+    Aimbot     = false,
+    InfStamina = false,
+    InfAmmo    = false,
+    NoFog      = false,
+    TeamCheck  = true,
+    WallCheck  = true,
+}
+
+local AimbotFOV    = 120
+local AimbotSmooth = 5   -- 1=instant, 50=creep
+
+local function smoothAlpha()
+    return math.clamp(1 / AimbotSmooth, 0.01, 1.0)
+end
+
+_G.FriendColor  = Color3.fromRGB(0, 255, 100)
+_G.EnemyColor   = Color3.fromRGB(255, 50, 50)
+_G.UseTeamColor = true
+
+local function getColor(p)
+    if _G.UseTeamColor then return p.TeamColor.Color end
+    return (LocalPlayer.TeamColor == p.TeamColor) and _G.FriendColor or _G.EnemyColor
+end
+
+local function hpColor(pct)
+    if pct > 0.5 then return Color3.fromRGB(math.floor(255*(1-pct)*2),255,0)
+    else return Color3.fromRGB(255,math.floor(255*pct*2),0) end
+end
+
+local function makeLine(thick,col)
+    local l=Drawing.new("Line"); l.Visible=false; l.Thickness=thick; l.Color=col; l.ZIndex=5; return l
+end
+local function makeCircle(r,thick,col)
+    local c=Drawing.new("Circle"); c.Visible=false; c.Filled=false; c.Thickness=thick
+    c.Radius=r; c.Color=col; c.ZIndex=5; return c
+end
+local function makeText(sz,col,center)
+    local t=Drawing.new("Text"); t.Visible=false; t.Size=sz; t.Color=col
+    t.Outline=true; t.Center=(center~=false); t.ZIndex=6; return t
+end
+
+local function isVisible(pos)
+    if not FLAGS.WallCheck then return true end
+    local char=LocalPlayer.Character; if not char then return true end
+    local hrp=char:FindFirstChild("HumanoidRootPart"); if not hrp then return true end
+    local rp=RaycastParams.new()
+    rp.FilterDescendantsInstances={char}; rp.FilterType=Enum.RaycastFilterType.Exclude
+    local res=workspace:Raycast(hrp.Position,pos-hrp.Position,rp)
+    if res then
+        for _,p in ipairs(Players:GetPlayers()) do
+            if p~=LocalPlayer and p.Character then
+                if res.Instance:IsDescendantOf(p.Character) then return true end
+            end
+        end
+        return false
+    end
+    return true
+end
+
+local function isEnemy(p)
+    if not FLAGS.TeamCheck then return true end
+    return LocalPlayer.TeamColor~=p.TeamColor
+end
+
+------------------------------------------------------------------------
+-- AIMBOT — FULL REWRITE
+-- Vấn đề cũ: Camera.CFrame bị game override mỗi frame
+-- Fix: detect platform, dùng đúng method
+------------------------------------------------------------------------
+
+-- Detect mobile
+local isMobile = UserInputSvc.TouchEnabled and not UserInputSvc.KeyboardEnabled
+
+-- Aimbot trigger state
+local aimbotTrigger = false   -- true khi đang aim
+
+-- Mobile: track touch ngoài UI
+if isMobile then
+    -- Tạo invisible button fullscreen để bắt touch
+    -- Nhưng cần đặt sau GUI load, xử lý ở bên dưới
+end
+
+-- PC: RMB
+UserInputSvc.InputBegan:Connect(function(inp, gpe)
+    if gpe then return end
+    if inp.UserInputType == Enum.UserInputType.MouseButton2 then
+        aimbotTrigger = true
+    end
+end)
+UserInputSvc.InputEnded:Connect(function(inp)
+    if inp.UserInputType == Enum.UserInputType.MouseButton2 then
+        aimbotTrigger = false
+    end
+end)
+
+local function getAimTarget()
+    local vp = Camera.ViewportSize
+    local center = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
+    local best, bestD = nil, AimbotFOV
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p == LocalPlayer then continue end
+        if not isEnemy(p) then continue end
+        local char = p.Character; if not char then continue end
+        local hum  = char:FindFirstChildOfClass("Humanoid")
+        local head = char:FindFirstChild("Head")
+        if not hum or not head or hum.Health <= 0 then continue end
+        if not isVisible(head.Position) then continue end
+        local sp, vis = Camera:WorldToViewportPoint(head.Position)
+        if not vis or sp.Z < 0 then continue end
+        local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+        if d < bestD then bestD = d; best = head end
+    end
+    return best
+end
+
+-- Original camera type để restore
+local origCamType = Camera.CameraType
+
+RunService.RenderStepped:Connect(function()
+    if not FLAGS.Aimbot then
+        -- Restore camera nếu aimbot OFF
+        if Camera.CameraType == Enum.CameraType.Scriptable then
+            Camera.CameraType = origCamType
+        end
+        return
+    end
+
+    if not aimbotTrigger then
+        -- Không aim → restore camera ke Custom (default Roblox)
+        if Camera.CameraType == Enum.CameraType.Scriptable then
+            Camera.CameraType = Enum.CameraType.Custom
+        end
+        return
+    end
+
+    local target = getAimTarget()
+    if not target then
+        if Camera.CameraType == Enum.CameraType.Scriptable then
+            Camera.CameraType = Enum.CameraType.Custom
+        end
+        return
+    end
+
+    -- Lock camera ke Scriptable agar bisa dicontrol penuh
+    if Camera.CameraType ~= Enum.CameraType.Scriptable then
+        Camera.CameraType = Enum.CameraType.Scriptable
+    end
+
+    local targetPos = target.Position
+    local camPos    = Camera.CFrame.Position
+    local currentCF = Camera.CFrame
+    local goalCF    = CFrame.lookAt(camPos, targetPos)
+    local alpha     = smoothAlpha()
+
+    Camera.CFrame = currentCF:Lerp(goalCF, alpha)
+end)
+
+-- Restore camera saat aimbot di-toggle OFF
+local prevAimbot = false
+RunService.Heartbeat:Connect(function()
+    if prevAimbot ~= FLAGS.Aimbot then
+        if not FLAGS.Aimbot then
+            Camera.CameraType = Enum.CameraType.Custom
+        end
+        prevAimbot = FLAGS.Aimbot
+    end
+end)
+
+------------------------------------------------------------------------
+-- FOV CIRCLE
+------------------------------------------------------------------------
+local FOVCircle = Drawing.new("Circle")
+FOVCircle.Visible=false; FOVCircle.Filled=false; FOVCircle.Thickness=1.5
+FOVCircle.Color=Color3.fromRGB(255,255,255); FOVCircle.Radius=AimbotFOV
+FOVCircle.Transparency=0.5; FOVCircle.ZIndex=20
+
+------------------------------------------------------------------------
+-- ESP
+------------------------------------------------------------------------
+local ESPCache={}
+local DRAW_KEYS={"BoxTop","BoxBot","BoxLeft","BoxRight","Head","Line","Name","HPBg","HPFill","HPText"}
+
+local function createDrawings(p)
+    if ESPCache[p] then return end
+    local col=getColor(p)
+    ESPCache[p]={
+        BoxTop  =makeLine(CFG.BoxThickness,col), BoxBot  =makeLine(CFG.BoxThickness,col),
+        BoxLeft =makeLine(CFG.BoxThickness,col), BoxRight=makeLine(CFG.BoxThickness,col),
+        Head    =makeCircle(CFG.HeadRadius,CFG.BoxThickness,col),
+        Line    =makeLine(CFG.LineThickness,col),
+        Name    =makeText(CFG.NameSize,Color3.fromRGB(255,255,255),true),
+        HPBg    =makeLine(CFG.HPBarWidth+2,Color3.fromRGB(0,0,0)),
+        HPFill  =makeLine(CFG.HPBarWidth,Color3.fromRGB(0,255,0)),
+        HPText  =makeText(CFG.HPSize,Color3.fromRGB(255,255,255),true),
+    }
+    ESPCache[p].Name.Text=p.Name
+end
+
+local function removeDrawings(p)
+    local e=ESPCache[p]; if not e then return end
+    for _,k in ipairs(DRAW_KEYS) do pcall(function() e[k]:Remove() end) end
+    ESPCache[p]=nil
+end
+
+local function hideDrawings(p)
+    local e=ESPCache[p]; if not e then return end
+    for _,k in ipairs(DRAW_KEYS) do pcall(function() e[k].Visible=false end) end
+end
+
+local function applyHighlight(p)
+    if not FLAGS.Highlight then return end
+    local char=p.Character; if not char then return end
+    local old=char:FindFirstChild("__ESPhl"); if old then old:Destroy() end
+    local hl=Instance.new("Highlight")
+    hl.Name="__ESPhl"; hl.Adornee=char
+    hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop
+    hl.FillColor=getColor(p); hl.FillTransparency=0.5
+    hl.OutlineColor=getColor(p); hl.OutlineTransparency=0; hl.Parent=char
+end
+
+local function removeHighlight(p)
+    local char=p.Character; if not char then return end
+    local hl=char:FindFirstChild("__ESPhl"); if hl then hl:Destroy() end
+end
+
+local function onCharAdded(p,char)
+    char:WaitForChild("Humanoid",8)
+    char:WaitForChild("HumanoidRootPart",8)
+    char:WaitForChild("Head",8)
+    createDrawings(p); applyHighlight(p)
+end
+
+local function hookPlayer(p)
+    if p==LocalPlayer then return end
+    createDrawings(p)
+    p.CharacterAdded:Connect(function(char) task.spawn(onCharAdded,p,char) end)
+    p.CharacterRemoving:Connect(function() hideDrawings(p) end)
+    p:GetPropertyChangedSignal("TeamColor"):Connect(function()
+        local e=ESPCache[p]; if not e then return end
+        local col=getColor(p)
+        for _,k in ipairs({"BoxTop","BoxBot","BoxLeft","BoxRight","Head","Line"}) do e[k].Color=col end
+        local char=p.Character
+        if char then
+            local hl=char:FindFirstChild("__ESPhl")
+            if hl then hl.FillColor=col; hl.OutlineColor=col end
+        end
+    end)
+    if p.Character then task.spawn(onCharAdded,p,p.Character) end
+end
+
+local function applyNoFog(on)
+    local L=game:GetService("Lighting")
+    L.FogEnd=on and 1e8 or 100000; L.FogStart=on and 1e8 or 0
+    local atmo=L:FindFirstChildOfClass("Atmosphere")
+    if atmo then atmo.Density=on and 0 or 0.35 end
+end
+
+RunService.Heartbeat:Connect(function()
+    if FLAGS.InfStamina then
+        local char=LocalPlayer.Character
+        if char then
+            local hum=char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                for _,n in ipairs({"Stamina","Energy","Sprint","Endurance"}) do
+                    pcall(function()
+                        local v=hum:FindFirstChild(n)
+                        if v and (v:IsA("NumberValue") or v:IsA("IntValue")) then v.Value=v.MaxValue or 100 end
+                    end)
+                    pcall(function()
+                        if hum:GetAttribute(n)~=nil then
+                            hum:SetAttribute(n,hum:GetAttribute("Max"..n) or 100)
+                        end
+                    end)
+                end
+            end
+        end
+    end
+    if FLAGS.InfAmmo then
+        local char=LocalPlayer.Character
+        if char then
+            for _,tool in ipairs(char:GetChildren()) do
+                if tool:IsA("Tool") then
+                    for _,v in ipairs(tool:GetDescendants()) do
+                        if v:IsA("NumberValue") or v:IsA("IntValue") then
+                            local n=v.Name:lower()
+                            if n:find("ammo") or n:find("bullet") or n:find("clip")
+                            or n:find("mag") or n:find("shot") then v.Value=9999 end
+                        end
+                        pcall(function()
+                            for _,a in ipairs({"Ammo","Bullets","Clip","Magazine","Shots"}) do
+                                if v:GetAttribute(a)~=nil then v:SetAttribute(a,9999) end
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+------------------------------------------------------------------------
+-- LAYOUT
+------------------------------------------------------------------------
+local ROW_H      = 32
+local ROW_PAD    = 5
+local SLIDER_H   = 50
+local LIST_PAD_T = 6
+local BADGE_H    = 28
+local SEC_PAD_B  = 8
+
+local AIM_ROWS   = 3
+local AIM_H      = BADGE_H + LIST_PAD_T
+                 + AIM_ROWS*(ROW_H+ROW_PAD)
+                 + (SLIDER_H+ROW_PAD)
+                 + (SLIDER_H+ROW_PAD)
+                 + SEC_PAD_B
+
+local ESP_ROWS   = 6
+local ESP_H      = BADGE_H + LIST_PAD_T
+                 + ESP_ROWS*(ROW_H+ROW_PAD)
+                 + SEC_PAD_B
+
+local PLR_ROWS   = 3
+local PLR_H      = BADGE_H + LIST_PAD_T
+                 + PLR_ROWS*(ROW_H+ROW_PAD)
+                 + SEC_PAD_B
+
+local SEC_H      = math.max(AIM_H, ESP_H, PLR_H)
+local TITLE_H    = 36
+local PANEL_W    = 860
+local COL_PAD    = 8
+local COL_GAP    = 8
+local SEC_W      = math.floor((PANEL_W - COL_PAD*2 - COL_GAP*2) / 3)
+local PANEL_H    = TITLE_H + 6 + SEC_H + 10
+
+------------------------------------------------------------------------
+-- GUI
+------------------------------------------------------------------------
+local gui=Instance.new("ScreenGui")
+gui.Name="ESPMenu"; gui.ResetOnSpawn=false
+gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+gui.IgnoreGuiInset=true; gui.Parent=game.CoreGui
+
+-- Player count
+local CountFrame=Instance.new("Frame",gui)
+CountFrame.Size=UDim2.new(0,200,0,36)
+CountFrame.AnchorPoint=Vector2.new(0.5,0)
+CountFrame.Position=UDim2.new(0.5,0,0,10)
+CountFrame.BackgroundColor3=Color3.fromRGB(15,15,15)
+CountFrame.BackgroundTransparency=0.3
+CountFrame.BorderSizePixel=0; CountFrame.ZIndex=30
+Instance.new("UICorner",CountFrame).CornerRadius=UDim.new(0,10)
+local cfS=Instance.new("UIStroke",CountFrame)
+cfS.Color=Color3.fromRGB(80,80,80); cfS.Thickness=1
+
+local CountLabel=Instance.new("TextLabel",CountFrame)
+CountLabel.Size=UDim2.new(1,0,1,0); CountLabel.BackgroundTransparency=1
+CountLabel.Text="Player : 0"; CountLabel.TextColor3=Color3.fromRGB(255,80,80)
+CountLabel.Font=Enum.Font.GothamBold; CountLabel.TextSize=16
+CountLabel.TextXAlignment=Enum.TextXAlignment.Center; CountLabel.ZIndex=31
+
+-- Toggle
+local ToggleBtn=Instance.new("TextButton",gui)
+ToggleBtn.Size=UDim2.new(0,90,0,36)
+ToggleBtn.Position=UDim2.new(1,-100,0,8)
+ToggleBtn.BackgroundColor3=Color3.fromRGB(30,215,96)
+ToggleBtn.TextColor3=Color3.fromRGB(255,255,255)
+ToggleBtn.Text="MENU"
+ToggleBtn.Font=Enum.Font.GothamBold; ToggleBtn.TextSize=14
+ToggleBtn.BorderSizePixel=0; ToggleBtn.AutoButtonColor=false; ToggleBtn.ZIndex=50
+Instance.new("UICorner",ToggleBtn).CornerRadius=UDim.new(0,8)
+local tbS=Instance.new("UIStroke",ToggleBtn)
+tbS.Color=Color3.fromRGB(255,255,255); tbS.Thickness=1.2; tbS.Transparency=0.6
+
+------------------------------------------------------------------------
+-- MOBILE: AIM BUTTON (chỉ hiện trên mobile)
+-- Nút bấm giữ để aim, đặt góc phải dưới
+------------------------------------------------------------------------
+local AimBtn = nil
+if isMobile then
+    AimBtn = Instance.new("TextButton", gui)
+    AimBtn.Size             = UDim2.new(0, 80, 0, 80)
+    AimBtn.Position         = UDim2.new(1, -100, 1, -170)
+    AimBtn.BackgroundColor3 = Color3.fromRGB(255, 80, 30)
+    AimBtn.BackgroundTransparency = 0.3
+    AimBtn.TextColor3       = Color3.fromRGB(255,255,255)
+    AimBtn.Text             = "AIM"
+    AimBtn.Font             = Enum.Font.GothamBold
+    AimBtn.TextSize         = 18
+    AimBtn.BorderSizePixel  = 0
+    AimBtn.AutoButtonColor  = false
+    AimBtn.ZIndex           = 60
+    Instance.new("UICorner", AimBtn).CornerRadius = UDim.new(0.5, 0)
+    local aS = Instance.new("UIStroke", AimBtn)
+    aS.Color = Color3.fromRGB(255,255,255); aS.Thickness = 2; aS.Transparency = 0.5
+
+    AimBtn.MouseButton1Down:Connect(function()
+        aimbotTrigger = true
+        AimBtn.BackgroundColor3 = Color3.fromRGB(255,30,30)
+    end)
+    AimBtn.MouseButton1Up:Connect(function()
+        aimbotTrigger = false
+        AimBtn.BackgroundColor3 = Color3.fromRGB(255,80,30)
+    end)
+    -- Touch support
+    AimBtn.TouchLongPress:Connect(function()
+        aimbotTrigger = true
+        AimBtn.BackgroundColor3 = Color3.fromRGB(255,30,30)
+    end)
+end
+
+-- Panel
+local Panel=Instance.new("Frame",gui)
+Panel.Size=UDim2.new(0,PANEL_W,0,PANEL_H)
+Panel.AnchorPoint=Vector2.new(0.5,0)
+Panel.Position=UDim2.new(0.5,0,0,54)
+Panel.BackgroundColor3=Color3.fromRGB(10,10,10)
+Panel.BorderSizePixel=0; Panel.Visible=false; Panel.ZIndex=40
+Instance.new("UICorner",Panel).CornerRadius=UDim.new(0,14)
+local pS=Instance.new("UIStroke",Panel); pS.Color=Color3.fromRGB(55,55,55); pS.Thickness=1
+
+local TitleBar=Instance.new("Frame",Panel)
+TitleBar.Size=UDim2.new(1,0,0,TITLE_H)
+TitleBar.BackgroundColor3=Color3.fromRGB(18,18,18)
+TitleBar.BorderSizePixel=0; TitleBar.ZIndex=41
+Instance.new("UICorner",TitleBar).CornerRadius=UDim.new(0,14)
+local tbFix=Instance.new("Frame",TitleBar)
+tbFix.Size=UDim2.new(1,0,0,14); tbFix.Position=UDim2.new(0,0,1,-14)
+tbFix.BackgroundColor3=Color3.fromRGB(18,18,18); tbFix.BorderSizePixel=0; tbFix.ZIndex=41
+
+local TitleLbl=Instance.new("TextLabel",TitleBar)
+TitleLbl.Size=UDim2.new(1,0,1,0); TitleLbl.BackgroundTransparency=1
+TitleLbl.Text="  ESP + AIMBOT  --  by fraughting"
+TitleLbl.TextColor3=Color3.fromRGB(255,255,255)
+TitleLbl.Font=Enum.Font.GothamBold; TitleLbl.TextSize=14
+TitleLbl.TextXAlignment=Enum.TextXAlignment.Left; TitleLbl.ZIndex=42
+
+local Content=Instance.new("Frame",Panel)
+Content.Size=UDim2.new(1,-COL_PAD*2,0,SEC_H)
+Content.Position=UDim2.new(0,COL_PAD,0,TITLE_H+6)
+Content.BackgroundTransparency=1; Content.ZIndex=41
+
+local HL=Instance.new("UIListLayout",Content)
+HL.FillDirection=Enum.FillDirection.Horizontal
+HL.SortOrder=Enum.SortOrder.LayoutOrder
+HL.Padding=UDim.new(0,COL_GAP)
+HL.VerticalAlignment=Enum.VerticalAlignment.Top
+HL.HorizontalAlignment=Enum.HorizontalAlignment.Left
+
+local function makeSection(title,order)
+    local sec=Instance.new("Frame",Content)
+    sec.Size=UDim2.new(0,SEC_W,0,SEC_H)
+    sec.BackgroundColor3=Color3.fromRGB(18,18,18)
+    sec.BorderSizePixel=0; sec.LayoutOrder=order; sec.ZIndex=42
+    Instance.new("UICorner",sec).CornerRadius=UDim.new(0,10)
+    local st=Instance.new("UIStroke",sec); st.Color=Color3.fromRGB(45,45,45); st.Thickness=1
+
+    local badge=Instance.new("Frame",sec)
+    badge.Size=UDim2.new(1,0,0,BADGE_H)
+    badge.BackgroundColor3=Color3.fromRGB(28,28,28); badge.BorderSizePixel=0; badge.ZIndex=43
+    Instance.new("UICorner",badge).CornerRadius=UDim.new(0,8)
+    local bFix=Instance.new("Frame",badge)
+    bFix.Size=UDim2.new(1,0,0,8); bFix.Position=UDim2.new(0,0,1,-8)
+    bFix.BackgroundColor3=Color3.fromRGB(28,28,28); bFix.BorderSizePixel=0; bFix.ZIndex=43
+    local bLbl=Instance.new("TextLabel",badge)
+    bLbl.Size=UDim2.new(1,0,1,0); bLbl.BackgroundTransparency=1
+    bLbl.Text="  "..title; bLbl.TextColor3=Color3.fromRGB(210,210,210)
+    bLbl.Font=Enum.Font.GothamBold; bLbl.TextSize=13
+    bLbl.TextXAlignment=Enum.TextXAlignment.Left; bLbl.ZIndex=44
+
+    local list=Instance.new("Frame",sec)
+    list.Size=UDim2.new(1,0,1,-BADGE_H); list.Position=UDim2.new(0,0,0,BADGE_H)
+    list.BackgroundTransparency=1; list.ClipsDescendants=false; list.ZIndex=43
+    local ll=Instance.new("UIListLayout",list)
+    ll.Padding=UDim.new(0,ROW_PAD); ll.SortOrder=Enum.SortOrder.LayoutOrder
+    local lp=Instance.new("UIPadding",list)
+    lp.PaddingLeft=UDim.new(0,6); lp.PaddingRight=UDim.new(0,6); lp.PaddingTop=UDim.new(0,LIST_PAD_T)
+    return list
+end
+
+local function makeRow(parent,label,flag,order,onChange)
+    local row=Instance.new("Frame",parent)
+    row.Size=UDim2.new(1,0,0,ROW_H)
+    row.BackgroundColor3=Color3.fromRGB(24,24,24)
+    row.BorderSizePixel=0; row.LayoutOrder=order; row.ZIndex=44
+    Instance.new("UICorner",row).CornerRadius=UDim.new(0,7)
+    local lbl=Instance.new("TextLabel",row)
+    lbl.Size=UDim2.new(1,-68,1,0); lbl.Position=UDim2.new(0,10,0,0)
+    lbl.BackgroundTransparency=1; lbl.Text=label
+    lbl.TextColor3=Color3.fromRGB(190,190,190)
+    lbl.Font=Enum.Font.GothamSemibold; lbl.TextSize=12
+    lbl.TextXAlignment=Enum.TextXAlignment.Left; lbl.ZIndex=45
+    local btn=Instance.new("TextButton",row)
+    btn.Size=UDim2.new(0,52,0,24); btn.Position=UDim2.new(1,-58,0.5,-12)
+    btn.BorderSizePixel=0; btn.Font=Enum.Font.GothamBold; btn.TextSize=12
+    btn.AutoButtonColor=false; btn.ZIndex=45
+    Instance.new("UICorner",btn).CornerRadius=UDim.new(0,6)
+    local function refresh()
+        local on=FLAGS[flag]
+        btn.Text=on and "ON" or "OFF"; btn.TextColor3=Color3.fromRGB(255,255,255)
+        btn.BackgroundColor3=on and Color3.fromRGB(30,200,80) or Color3.fromRGB(180,40,40)
+    end
+    refresh()
+    btn.MouseButton1Click:Connect(function()
+        FLAGS[flag]=not FLAGS[flag]; refresh()
+        if onChange then onChange(FLAGS[flag]) end
+    end)
+end
+
+local function makeSlider(parent,label,order,minV,maxV,curV,color,onChange)
+    local fillColor=color or Color3.fromRGB(30,200,80)
+    local row=Instance.new("Frame",parent)
+    row.Size=UDim2.new(1,0,0,SLIDER_H)
+    row.BackgroundColor3=Color3.fromRGB(24,24,24)
+    row.BorderSizePixel=0; row.LayoutOrder=order; row.ZIndex=44
+    Instance.new("UICorner",row).CornerRadius=UDim.new(0,7)
+    local vl=Instance.new("TextLabel",row)
+    vl.Name="VL"; vl.Size=UDim2.new(1,-10,0,20); vl.Position=UDim2.new(0,10,0,5)
+    vl.BackgroundTransparency=1; vl.Text=label..": "..curV
+    vl.TextColor3=Color3.fromRGB(190,190,190); vl.Font=Enum.Font.GothamSemibold
+    vl.TextSize=11; vl.TextXAlignment=Enum.TextXAlignment.Left; vl.ZIndex=45
+    local track=Instance.new("Frame",row)
+    track.Size=UDim2.new(1,-20,0,6); track.Position=UDim2.new(0,10,0,32)
+    track.BackgroundColor3=Color3.fromRGB(50,50,50); track.BorderSizePixel=0; track.ZIndex=45
+    Instance.new("UICorner",track).CornerRadius=UDim.new(0,3)
+    local p0=(curV-minV)/(maxV-minV)
+    local fill=Instance.new("Frame",track)
+    fill.Size=UDim2.new(p0,0,1,0); fill.BackgroundColor3=fillColor
+    fill.BorderSizePixel=0; fill.ZIndex=46
+    Instance.new("UICorner",fill).CornerRadius=UDim.new(0,3)
+    local knob=Instance.new("TextButton",track)
+    knob.Size=UDim2.new(0,16,0,16); knob.Position=UDim2.new(p0,-8,0.5,-8)
+    knob.BackgroundColor3=Color3.fromRGB(255,255,255); knob.BorderSizePixel=0
+    knob.Text=""; knob.AutoButtonColor=false; knob.ZIndex=47
+    Instance.new("UICorner",knob).CornerRadius=UDim.new(0.5,0)
+    local dragging=false
+    knob.MouseButton1Down:Connect(function() dragging=true end)
+    UserInputSvc.InputEnded:Connect(function(inp)
+        if inp.UserInputType==Enum.UserInputType.MouseButton1
+        or inp.UserInputType==Enum.UserInputType.Touch then dragging=false end
+    end)
+    UserInputSvc.InputChanged:Connect(function(inp)
+        if not dragging then return end
+        if inp.UserInputType~=Enum.UserInputType.MouseMovement
+        and inp.UserInputType~=Enum.UserInputType.Touch then return end
+        local abs=track.AbsolutePosition; local sz=track.AbsoluteSize
+        local rel=math.clamp((inp.Position.X-abs.X)/sz.X,0,1)
+        local val=math.floor(minV+rel*(maxV-minV))
+        fill.Size=UDim2.new(rel,0,1,0); knob.Position=UDim2.new(rel,-8,0.5,-8)
+        vl.Text=label..": "..val
+        if onChange then onChange(val) end
+    end)
+end
+
+-- Build
+local aimList=makeSection("Aimbot",1)
+makeRow(aimList,"Aimbot","Aimbot",1)
+makeRow(aimList,"Team Check","TeamCheck",2)
+makeRow(aimList,"Wall Check","WallCheck",3)
+makeSlider(aimList,"FOV",4,30,400,AimbotFOV,Color3.fromRGB(30,200,80),function(v)
+    AimbotFOV=v; FOVCircle.Radius=v
+end)
+makeSlider(aimList,"Smooth",5,1,50,AimbotSmooth,Color3.fromRGB(50,150,255),function(v)
+    AimbotSmooth=v
+end)
+
+local espList=makeSection("ESP",2)
+makeRow(espList,"Box","Box",1)
+makeRow(espList,"Dau","Head",2)
+makeRow(espList,"Tracer","Line",3)
+makeRow(espList,"Ten","Name",4)
+makeRow(espList,"Mau","HP",5)
+makeRow(espList,"Highlight","Highlight",6,function(on)
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p~=LocalPlayer then if on then applyHighlight(p) else removeHighlight(p) end end
+    end
+end)
+
+local playerList=makeSection("Player",3)
+makeRow(playerList,"Inf Stamina","InfStamina",1)
+makeRow(playerList,"Inf Ammo","InfAmmo",2)
+makeRow(playerList,"No Fog","NoFog",3,function(on) applyNoFog(on) end)
+
+ToggleBtn.MouseButton1Click:Connect(function()
+    FLAGS.MenuOpen=not FLAGS.MenuOpen
+    Panel.Visible=FLAGS.MenuOpen
+    ToggleBtn.Text=FLAGS.MenuOpen and "CLOSE" or "MENU"
+    ToggleBtn.BackgroundColor3=FLAGS.MenuOpen
+        and Color3.fromRGB(200,40,40) or Color3.fromRGB(30,215,96)
+    -- Sembunyikan AimBtn saat menu terbuka
+    if AimBtn then AimBtn.Visible=not FLAGS.MenuOpen end
+end)
+
+------------------------------------------------------------------------
+-- RENDER LOOP
+------------------------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+    local cam=Camera; local vp=cam.ViewportSize
+    local lineFrom=Vector2.new(vp.X*.5,vp.Y)
+    local center=Vector2.new(vp.X*.5,vp.Y*.5)
+    local total=0
+
+    FOVCircle.Position=center; FOVCircle.Visible=FLAGS.Aimbot
+
+    for _,p in ipairs(Players:GetPlayers()) do
+        if p==LocalPlayer then continue end
+        total=total+1
+        local e=ESPCache[p]; if not e then continue end
+        local char=p.Character
+        if not char then hideDrawings(p); continue end
+        local hum=char:FindFirstChildOfClass("Humanoid")
+        local hrp=char:FindFirstChild("HumanoidRootPart")
+        local head=char:FindFirstChild("Head")
+        if not hum or not hrp or not head or hum.Health<=0 then hideDrawings(p); continue end
+        local headTop=head.Position+Vector3.new(0,head.Size.Y*.5,0)
+        local feet=hrp.Position-Vector3.new(0,CFG.FeetOffset,0)
+        local headCtr=head.Position
+        local htSP=cam:WorldToViewportPoint(headTop)
+        local ftSP=cam:WorldToViewportPoint(feet)
+        local hcSP=cam:WorldToViewportPoint(headCtr)
+        if htSP.Z<0 then hideDrawings(p); continue end
+        local col=getColor(p)
+        local bH=math.abs(htSP.Y-ftSP.Y); local bW=bH*CFG.BoxWidthRatio
+        local cx=htSP.X; local bTop=htSP.Y; local bBot=ftSP.Y
+        local bL=cx-bW*.5; local bR=cx+bW*.5
+        e.BoxTop.From=Vector2.new(bL,bTop);  e.BoxTop.To=Vector2.new(bR,bTop)
+        e.BoxTop.Color=col;  e.BoxTop.Visible=FLAGS.Box
+        e.BoxBot.From=Vector2.new(bL,bBot);  e.BoxBot.To=Vector2.new(bR,bBot)
+        e.BoxBot.Color=col;  e.BoxBot.Visible=FLAGS.Box
+        e.BoxLeft.From=Vector2.new(bL,bTop); e.BoxLeft.To=Vector2.new(bL,bBot)
+        e.BoxLeft.Color=col; e.BoxLeft.Visible=FLAGS.Box
+        e.BoxRight.From=Vector2.new(bR,bTop);e.BoxRight.To=Vector2.new(bR,bBot)
+        e.BoxRight.Color=col;e.BoxRight.Visible=FLAGS.Box
+        e.Head.Position=Vector2.new(hcSP.X,hcSP.Y)
+        e.Head.Color=col; e.Head.Visible=FLAGS.Head
+        e.Line.From=lineFrom; e.Line.To=Vector2.new(cx,bBot)
+        e.Line.Color=col; e.Line.Visible=FLAGS.Line
+        e.Name.Text=p.Name; e.Name.Position=Vector2.new(cx,bTop-16)
+        e.Name.Visible=FLAGS.Name
+        local pct=math.clamp(hum.Health/math.max(hum.MaxHealth,1),0,1)
+        local hpH=bH*pct; local barX=bL-CFG.HPBarGap
+        e.HPBg.From=Vector2.new(barX,bTop); e.HPBg.To=Vector2.new(barX,bBot)
+        e.HPBg.Visible=FLAGS.HP
+        e.HPFill.From=Vector2.new(barX,bBot); e.HPFill.To=Vector2.new(barX,bBot-hpH)
+        e.HPFill.Color=hpColor(pct); e.HPFill.Visible=FLAGS.HP
+        e.HPText.Text=math.floor(pct*100).."%"
+        e.HPText.Position=Vector2.new(barX,bTop-14); e.HPText.Visible=FLAGS.HP
+        local hl=char:FindFirstChild("__ESPhl")
+        if hl then hl.FillColor=col; hl.OutlineColor=col end
+    end
+    CountLabel.Text="Player : "..total
+end)
+
+for _,p in ipairs(Players:GetPlayers()) do task.spawn(hookPlayer,p) end
+Players.PlayerAdded:Connect(hookPlayer)
+Players.PlayerRemoving:Connect(removeDrawings)
